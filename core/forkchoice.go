@@ -111,7 +111,10 @@ func (f *ForkChoice) ReorgNeeded(current *types.Header, header *types.Header, ch
 	// Check with the bor chain validator service
 	if reorg && f.validator != nil {
 		if isValid := f.validator.IsValidChain(current, chain); !isValid {
+			log.Info("❌ [Whitelist] Chain validation failed", "current", current.Number.Uint64(), "header", header.Number.Uint64(), "chain length", len(chain))
 			reorg = false
+		} else {
+			log.Info("✅ [Whitelist] Chain validation succeeded ", "current", current.Number.Uint64(), "header", header.Number.Uint64(), "chain length", len(chain))
 		}
 	}
 
