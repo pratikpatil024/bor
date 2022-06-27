@@ -620,7 +620,7 @@ func (s *Ethereum) startCheckpointWhitelistService() {
 		log.Warn("unable to whitelist checkpoint - first run", "err", err)
 	}
 
-	ticker := time.NewTicker(100 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for {
