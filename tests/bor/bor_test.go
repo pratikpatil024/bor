@@ -616,3 +616,22 @@ func testEncodeSigHeader(w io.Writer, header *types.Header, c *params.BorConfig)
 		panic("can't encode: " + err.Error())
 	}
 }
+
+func TestCheckpoint(t *testing.T) {
+	h, err := bor.NewHeimdallClient("http://localhost:1317")
+	if err != nil {
+		t.Error(err)
+	}
+
+	count, err := h.FetchCheckpointCount()
+	if err != nil {
+		t.Error(err)
+	}
+	t.Log("Count", count)
+
+	checkpoint, err := h.FetchCheckpoint(count)
+	if err != nil {
+		t.Error(err)
+	}
+	t.Log("Checkpoint", checkpoint)
+}
