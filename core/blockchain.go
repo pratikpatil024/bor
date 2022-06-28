@@ -943,13 +943,18 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 
 		// Rewind may have occurred, skip in that case.
 		if bc.CurrentHeader().Number.Cmp(head.Number()) >= 0 {
-			log.Info("### InsertReceiptChain: updateHead: calling reorgNeeded", "current", head.Header().Number.Uint64(), "headers length", len(headers), "start", headers[0].Number.Uint64(), "end", headers[0].Number.Uint64())
-			reorg, err := bc.forker.ReorgNeeded(bc.CurrentFastBlock().Header(), head.Header(), headers)
-			log.Info("### InsertReceiptChain: updateHead: called reorgNeeded", "reorg", reorg)
+			reorg, err := bc.forker.ReorgNeeded(bc.CurrentFastBlock().Header(), head.Header())
 			if err != nil {
 				log.Warn("Reorg failed", "err", err)
 				return false
 			} else if !reorg {
+				return false
+			}
+			isValid, err := bc.forker.ValidateReorg(bc.CurrentFastBlock().Header(), headers)
+			if err != nil {
+				log.Warn("Reorg failed", "err", err)
+				return false
+			} else if !isValid {
 				return false
 			}
 			rawdb.WriteHeadFastBlockHash(bc.db, head.Hash())
@@ -1351,10 +1356,7 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 		return NonStatTy, err
 	}
 	currentBlock := bc.CurrentBlock()
-	headers := []*types.Header{block.Header()}
-	log.Info("### writeBlockAndSetHead: calling reorgNeeded", "current", currentBlock.NumberU64(), "incoming header", block.NumberU64())
-	reorg, err := bc.forker.ReorgNeeded(currentBlock.Header(), block.Header(), headers)
-	log.Info("### writeBlockAndSetHead: called reorgNeeded", "reorg", reorg)
+	reorg, err := bc.forker.ReorgNeeded(currentBlock.Header(), block.Header())
 	if err != nil {
 		return NonStatTy, err
 	}
@@ -1511,6 +1513,17 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 	it := newInsertIterator(chain, results, bc.validator)
 	block, err := it.next()
 
+	// Check the validity of incoming chain
+	isValid, err1 := bc.forker.ValidateReorg(bc.CurrentBlock().Header(), headers)
+	if err1 != nil {
+		return it.index, err1
+	}
+	if !isValid {
+		// The chain to be imported is invalid as the blocks doesn't match with
+		// the whitelisted checkpoints.
+		return it.index, nil
+	}
+
 	// Left-trim all the known blocks that don't need to build snapshot
 	if bc.skipBlock(err, it) {
 		// First block (and state) is known
@@ -1522,14 +1535,8 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 			reorg   bool
 			current = bc.CurrentBlock()
 		)
-		temp := true
 		for block != nil && bc.skipBlock(err, it) {
-			if temp {
-				log.Info("### insertChain loop, starting to iterate over blocks and check for reorgNeeded")
-				temp = false
-			}
-			headers := []*types.Header{block.Header()}
-			reorg, err = bc.forker.ReorgNeeded(current.Header(), block.Header(), headers)
+			reorg, err = bc.forker.ReorgNeeded(current.Header(), block.Header())
 			if err != nil {
 				return it.index, err
 			}
@@ -1919,13 +1926,17 @@ func (bc *BlockChain) insertSideChain(block *types.Block, it *insertIterator) (i
 	//
 	// If the externTd was larger than our local TD, we now need to reimport the previous
 	// blocks to regenerate the required state
-	log.Info("### insertSideChain: calling reorgNeeded", "current", current.Number().Uint64(), "headers length", len(headers), "start", headers[0].Number.Uint64(), "end", headers[0].Number.Uint64())
-	reorg, err := bc.forker.ReorgNeeded(current.Header(), lastBlock.Header(), headers)
-	log.Info("### insertSideChain: called reorgNeeded", "reorg", reorg)
+	reorg, err := bc.forker.ReorgNeeded(current.Header(), lastBlock.Header())
 	if err != nil {
 		return it.index, err
 	}
-	if !reorg {
+	log.Info("### insertSideChain: calling ValidateReorg", "current", current.Number().Uint64(), "headers length", len(headers), "start", headers[0].Number.Uint64(), "end", headers[0].Number.Uint64())
+	isValid, err := bc.forker.ValidateReorg(current.Header(), headers)
+	log.Info("### insertSideChain: called ValidateReorg", "isValid", isValid)
+	if err != nil {
+		return it.index, err
+	}
+	if !reorg || !isValid {
 		localTd := bc.GetTd(current.Hash(), current.NumberU64())
 		log.Info("Sidechain written to disk", "start", it.first().NumberU64(), "end", it.previous().Number, "sidetd", externTd, "localtd", localTd)
 		return it.index, err
