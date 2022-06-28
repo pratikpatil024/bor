@@ -285,6 +285,8 @@ func (hc *HeaderChain) writeHeadersAndSetHead(headers []*types.Header, forker *F
 	)
 
 	// Ask the fork choicer if the reorg is necessary
+	log.Info("### writeHeadersAndSetHead: calling reorgNeeded", "header", hc.CurrentHeader().Number.Uint64(),
+		"headers length", len(headers), "start", headers[0].Number.Uint64(), "end", headers[len(headers)-1].Number.Uint64())
 	if reorg, err := forker.ReorgNeeded(hc.CurrentHeader(), lastHeader, headers); err != nil {
 		return nil, err
 	} else if !reorg {

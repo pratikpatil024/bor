@@ -943,7 +943,9 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 
 		// Rewind may have occurred, skip in that case.
 		if bc.CurrentHeader().Number.Cmp(head.Number()) >= 0 {
+			log.Info("### InsertReceiptChain: updateHead: calling reorgNeeded", "current", head.Header().Number.Uint64(), "headers length", len(headers), "start", headers[0].Number.Uint64(), "end", headers[0].Number.Uint64())
 			reorg, err := bc.forker.ReorgNeeded(bc.CurrentFastBlock().Header(), head.Header(), headers)
+			log.Info("### InsertReceiptChain: updateHead: called reorgNeeded", "reorg", reorg)
 			if err != nil {
 				log.Warn("Reorg failed", "err", err)
 				return false
@@ -1204,6 +1206,7 @@ func (bc *BlockChain) writeBlockWithoutState(block *types.Block, td *big.Int) (e
 func (bc *BlockChain) writeKnownBlock(block *types.Block) error {
 	current := bc.CurrentBlock()
 	if block.ParentHash() != current.Hash() {
+		log.Info("### writeKnownBlock: calling reorg")
 		if err := bc.reorg(current, block); err != nil {
 			return err
 		}
@@ -1349,13 +1352,16 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 	}
 	currentBlock := bc.CurrentBlock()
 	headers := []*types.Header{block.Header()}
+	log.Info("### writeBlockAndSetHead: calling reorgNeeded", "current", currentBlock.NumberU64(), "incoming header", block.NumberU64())
 	reorg, err := bc.forker.ReorgNeeded(currentBlock.Header(), block.Header(), headers)
+	log.Info("### writeBlockAndSetHead: called reorgNeeded", "reorg", reorg)
 	if err != nil {
 		return NonStatTy, err
 	}
 	if reorg {
 		// Reorganise the chain if the parent is not the head block
 		if block.ParentHash() != currentBlock.Hash() {
+			log.Info("### writeBlockAndSetHead: calling reorg")
 			if err := bc.reorg(currentBlock, block); err != nil {
 				return NonStatTy, err
 			}
@@ -1473,6 +1479,10 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		return 0, nil
 	}
 
+	if len(chain) >= 20 {
+		log.Info("### insertChain", "length", len(chain), "start", chain[0].NumberU64(), "end", chain[len(chain)-1].NumberU64())
+	}
+
 	// Start a parallel signature recovery (signer will fluke on fork transition, minimal perf loss)
 	senderCacher.recoverFromBlocks(types.MakeSigner(bc.chainConfig, chain[0].Number()), chain)
 
@@ -1512,7 +1522,12 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 			reorg   bool
 			current = bc.CurrentBlock()
 		)
+		temp := true
 		for block != nil && bc.skipBlock(err, it) {
+			if temp {
+				log.Info("### insertChain loop, starting to iterate over blocks and check for reorgNeeded")
+				temp = false
+			}
 			headers := []*types.Header{block.Header()}
 			reorg, err = bc.forker.ReorgNeeded(current.Header(), block.Header(), headers)
 			if err != nil {
@@ -1904,7 +1919,9 @@ func (bc *BlockChain) insertSideChain(block *types.Block, it *insertIterator) (i
 	//
 	// If the externTd was larger than our local TD, we now need to reimport the previous
 	// blocks to regenerate the required state
+	log.Info("### insertSideChain: calling reorgNeeded", "current", current.Number().Uint64(), "headers length", len(headers), "start", headers[0].Number.Uint64(), "end", headers[0].Number.Uint64())
 	reorg, err := bc.forker.ReorgNeeded(current.Header(), lastBlock.Header(), headers)
+	log.Info("### insertSideChain: called reorgNeeded", "reorg", reorg)
 	if err != nil {
 		return it.index, err
 	}
@@ -2058,6 +2075,7 @@ func mergeLogs(logs [][]*types.Log, reverse bool) []*types.Log {
 // Note the new head block won't be processed here, callers need to handle it
 // externally.
 func (bc *BlockChain) reorg(oldBlock, newBlock *types.Block) error {
+	log.Info("### reorg", "oldBlock", oldBlock.NumberU64(), "newBlock", newBlock.NumberU64())
 	var (
 		newChain    types.Blocks
 		oldChain    types.Blocks
@@ -2231,6 +2249,7 @@ func (bc *BlockChain) SetChainHead(head *types.Block) error {
 	// Run the reorg if necessary and set the given block as new head.
 	start := time.Now()
 	if head.ParentHash() != bc.CurrentBlock().Hash() {
+		log.Info("### SetChainHead: calling reorg")
 		if err := bc.reorg(bc.CurrentBlock(), head); err != nil {
 			return err
 		}
