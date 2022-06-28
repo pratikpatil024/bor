@@ -1481,10 +1481,6 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		return 0, nil
 	}
 
-	if len(chain) >= 20 {
-		log.Info("### insertChain", "length", len(chain), "start", chain[0].NumberU64(), "end", chain[len(chain)-1].NumberU64())
-	}
-
 	// Start a parallel signature recovery (signer will fluke on fork transition, minimal perf loss)
 	senderCacher.recoverFromBlocks(types.MakeSigner(bc.chainConfig, chain[0].Number()), chain)
 
@@ -1514,7 +1510,13 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 	block, err := it.next()
 
 	// Check the validity of incoming chain
+	if len(chain) >= 20 {
+		log.Info("### insertChain: calling validateReorg", "current", bc.CurrentBlock().NumberU64(), "length", len(chain), "start", chain[0].NumberU64(), "end", chain[len(chain)-1].NumberU64())
+	}
 	isValid, err1 := bc.forker.ValidateReorg(bc.CurrentBlock().Header(), headers)
+	if len(chain) >= 20 {
+		log.Info("### insertChain: called validateReorg", "isValid", isValid)
+	}
 	if err1 != nil {
 		return it.index, err1
 	}
