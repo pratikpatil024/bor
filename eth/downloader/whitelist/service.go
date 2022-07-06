@@ -38,7 +38,7 @@ var (
 func (w *Service) IsValidPeer(remoteHeader *types.Header, fetchHeadersByNumber func(number uint64, amount int, skip int, reverse bool) ([]*types.Header, []common.Hash, error)) (bool, error) {
 	// We want to validate the chain by comparing the last checkpointed block
 	// we're storing in `checkpointWhitelist` with the peer's block.
-
+	//
 	// Check for availaibility of the last checkpointed block.
 	// This can be also be empty if our heimdall is not responding
 	// or we're running without it.
@@ -101,8 +101,14 @@ func (w *Service) IsValidChain(currentHeader *types.Header, chain []*types.Heade
 	// Split the chain into past and future chain
 	pastChain, futureChain := splitChain(current, chain)
 
-	// Don't accept future chain of unacceptable length
-	if len(futureChain) > int(w.checkpointInterval) {
+	// Add an offset to future chain if it's not in continuity
+	offset := 0
+	if len(futureChain) != 0 {
+		offset += int(futureChain[0].Number.Uint64()-currentHeader.Number.Uint64()) - 1
+	}
+
+	// Don't accept future chain of unacceptable length (from current block)
+	if len(futureChain)+offset > int(w.checkpointInterval) {
 		return false
 	}
 
@@ -124,6 +130,7 @@ func splitChain(current uint64, chain []*types.Header) ([]*types.Header, []*type
 		first       uint64 = chain[0].Number.Uint64()
 		last        uint64 = chain[len(chain)-1].Number.Uint64()
 	)
+
 	if current >= first {
 		if len(chain) == 1 || current >= last {
 			pastChain = chain
@@ -131,6 +138,7 @@ func splitChain(current uint64, chain []*types.Header) ([]*types.Header, []*type
 			pastChain = chain[:current-first+1]
 		}
 	}
+
 	if current < last {
 		if len(chain) == 1 || current < first {
 			futureChain = chain
@@ -138,6 +146,7 @@ func splitChain(current uint64, chain []*types.Header) ([]*types.Header, []*type
 			futureChain = chain[current-first+1:]
 		}
 	}
+
 	return pastChain, futureChain
 }
 

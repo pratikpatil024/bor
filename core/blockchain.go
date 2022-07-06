@@ -39,6 +39,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/eth/downloader/whitelist"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/syncx"
@@ -135,9 +136,9 @@ type CacheConfig struct {
 	SnapshotWait bool // Wait for snapshot construction on startup. TODO(karalabe): This is a dirty hack for testing, nuke it
 }
 
-// defaultCacheConfig are the default caching values if none are specified by the
+// DefaultCacheConfig are the default caching values if none are specified by the
 // user (also used during testing).
-var defaultCacheConfig = &CacheConfig{
+var DefaultCacheConfig = &CacheConfig{
 	TrieCleanLimit: 256,
 	TrieDirtyLimit: 256,
 	TrieTimeLimit:  5 * time.Minute,
@@ -222,9 +223,10 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator
 // and Processor.
+//nolint:gocognit
 func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(header *types.Header) bool, txLookupLimit *uint64, checker ethereum.ChainValidator) (*BlockChain, error) {
 	if cacheConfig == nil {
-		cacheConfig = defaultCacheConfig
+		cacheConfig = DefaultCacheConfig
 	}
 	bodyCache, _ := lru.New(bodyCacheLimit)
 	bodyRLPCache, _ := lru.New(bodyCacheLimit)
@@ -950,6 +952,7 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 			} else if !reorg {
 				return false
 			}
+
 			isValid, err := bc.forker.ValidateReorg(bc.CurrentFastBlock().Header(), headers)
 			if err != nil {
 				log.Warn("Reorg failed", "err", err)
@@ -997,6 +1000,7 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 		// BOR: Retrieve all the bor receipts and also maintain the array of headers
 		// for bor specific reorg check.
 		borReceipts := []types.Receipts{}
+
 		var headers []*types.Header
 		for _, block := range blockChain {
 			borReceipts = append(borReceipts, []*types.Receipt{bc.GetBorReceiptByHash(block.Hash())})
@@ -1138,6 +1142,7 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 				return 0, err
 			}
 		}
+
 		updateHead(blockChain[len(blockChain)-1], headers)
 		return 0, nil
 	}
@@ -1523,7 +1528,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 	if !isValid {
 		// The chain to be imported is invalid as the blocks doesn't match with
 		// the whitelisted checkpoints.
-		return it.index, errors.New("invalid chain: whitelist") // TODO: take error type from whitelist
+		return it.index, whitelist.ErrCheckpointMismatch
 	}
 
 	// Left-trim all the known blocks that don't need to build snapshot

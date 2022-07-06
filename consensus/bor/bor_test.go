@@ -4,18 +4,22 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/consensus/bor/heimdall" //nolint:typecheck
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestGenesisContractChange(t *testing.T) {
+	t.Parallel()
+
 	addr0 := common.Address{0x1}
 
 	b := &Bor{
@@ -101,6 +105,8 @@ func TestGenesisContractChange(t *testing.T) {
 }
 
 func TestEncodeSigHeaderJaipur(t *testing.T) {
+	t.Parallel()
+
 	// As part of the EIP-1559 fork in mumbai, an incorrect seal hash
 	// was used for Bor that did not included the BaseFee. The Jaipur
 	// block is a hard fork to fix that.
@@ -134,4 +140,47 @@ func TestEncodeSigHeaderJaipur(t *testing.T) {
 	// Jaipur NOT enabled and BaseFee set
 	hash = SealHash(h, &params.BorConfig{JaipurBlock: 10})
 	assert.Equal(t, hash, hashWithoutBaseFee)
+}
+
+// TestCheckpoint can be used for to fetch checkpoint
+// count and checkpoint for debugging purpose.
+// Also, this is kept only for local use.
+func TestCheckpoint(t *testing.T) {
+	t.Skip()
+	t.Parallel()
+
+	// TODO: For testing, add heimdall url here
+	h := heimdall.NewHeimdallClient("")
+
+	count, err := h.FetchCheckpointCount()
+	if err != nil {
+		t.Error(err)
+	}
+
+	t.Log("Count:", count)
+
+	checkpoint1, err := h.FetchCheckpoint(count)
+	if err != nil {
+		t.Error(err)
+	}
+
+	t.Log("Checkpoint1:", checkpoint1)
+
+	checkpoint2, err := h.FetchCheckpoint(10000)
+	if err != nil {
+		t.Error(err)
+	}
+
+	t.Log("Checkpoint2:", checkpoint2)
+
+	checkpoint3, err := h.FetchCheckpoint(-1)
+	if err != nil {
+		t.Error(err)
+	}
+
+	t.Log("Checkpoint3:", checkpoint3)
+
+	if checkpoint3.RootHash != checkpoint1.RootHash {
+		t.Fatal("Invalid root hash")
+	}
 }
