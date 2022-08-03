@@ -66,7 +66,6 @@ type ExecutionTask struct {
 	evmConfig         vm.Config
 	result            *ExecutionResult
 	shouldDelayFeeCal *bool
-	sender            common.Address
 }
 
 func (task *ExecutionTask) Execute(mvh *blockstm.MVHashMap, incarnation int) (err error) {
@@ -119,10 +118,6 @@ func (task *ExecutionTask) MVWriteList() []blockstm.WriteDescriptor {
 
 func (task *ExecutionTask) MVFullWriteList() []blockstm.WriteDescriptor {
 	return task.statedb.MVFullWriteList()
-}
-
-func (task *ExecutionTask) Sender() common.Address {
-	return task.sender
 }
 
 // Process processes the state changes according to the Ethereum rules by running
@@ -178,7 +173,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			blockContext:      bc,
 			evmConfig:         cfg,
 			shouldDelayFeeCal: &shouldDelayFeeCal,
-			sender:            msg.From(),
 		}
 
 		tasks = append(tasks, task)
@@ -195,6 +189,242 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 
 	for _, task := range tasks {
 		task := task.(*ExecutionTask)
+		statedb.Prepare(task.tx.Hash(), task.index)
+
+		coinbaseBalance := statedb.GetBalance(task.blockContext.Coinbase)
+
+		statedb.ApplyMVWriteSet(task.MVWriteList())
+
+		for _, l := range task.statedb.GetLogs(task.tx.Hash(), blockHash) {
+			statedb.AddLog(l)
+		}
+
+		if shouldDelayFeeCal {
+			if london {
+				statedb.AddBalance(task.result.BurntContractAddress, task.result.FeeBurnt)
+			}
+
+			statedb.AddBalance(task.blockContext.Coinbase, task.result.FeeTipped)
+			output1 := new(big.Int).SetBytes(task.result.senderInitBalance.Bytes())
+			output2 := new(big.Int).SetBytes(coinbaseBalance.Bytes())
+
+			// Deprecating transfer log and will be removed in future fork. PLEASE DO NOT USE this transfer log going forward. Parameters won't get updated as expected going forward with EIP1559
+			// add transfer log
+			AddFeeTransferLog(
+				statedb,
+
+				task.msg.From(),
+				task.blockContext.Coinbase,
+
+				task.result.FeeTipped,
+				task.result.senderInitBalance,
+				coinbaseBalance,
+				output1.Sub(output1, task.result.FeeTipped),
+				output2.Add(output2, task.result.FeeTipped),
+			)
+		}
+
+		for k, v := range task.statedb.Preimages() {
+			statedb.AddPreimage(k, v)
+		}
+
+		// Update the state with pending changes.
+		var root []byte
+
+		if p.config.IsByzantium(blockNumber) {
+			statedb.Finalise(true)
+		} else {
+			root = statedb.IntermediateRoot(p.config.IsEIP158(blockNumber)).Bytes()
+		}
+
+		*usedGas += task.result.UsedGas
+
+		// Create a new receipt for the transaction, storing the intermediate root and gas used
+		// by the tx.
+		receipt := &types.Receipt{Type: task.tx.Type(), PostState: root, CumulativeGasUsed: *usedGas}
+		if task.result.Failed() {
+			receipt.Status = types.ReceiptStatusFailed
+		} else {
+			receipt.Status = types.ReceiptStatusSuccessful
+		}
+
+		receipt.TxHash = task.tx.Hash()
+		receipt.GasUsed = task.result.UsedGas
+
+		// If the transaction created a contract, store the creation address in the receipt.
+		if task.msg.To() == nil {
+			receipt.ContractAddress = crypto.CreateAddress(task.msg.From(), task.tx.Nonce())
+		}
+
+		// Set the receipt logs and create the bloom filter.
+		receipt.Logs = statedb.GetLogs(task.tx.Hash(), blockHash)
+		receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+		receipt.BlockHash = blockHash
+		receipt.BlockNumber = blockNumber
+		receipt.TransactionIndex = uint(statedb.TxIndex())
+
+		receipts = append(receipts, receipt)
+		allLogs = append(allLogs, receipt.Logs...)
+	}
+
+	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
+	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles())
+
+	return receipts, allLogs, *usedGas, nil
+}
+
+type ParallelStateProcessorPrio struct {
+	config *params.ChainConfig // Chain configuration options
+	bc     *BlockChain         // Canonical block chain
+	engine consensus.Engine    // Consensus engine used for block rewards
+}
+
+// NewStateProcessor initialises a new StateProcessor.
+func NewParallelStateProcessorPrio(config *params.ChainConfig, bc *BlockChain, engine consensus.Engine) *ParallelStateProcessorPrio {
+	return &ParallelStateProcessorPrio{
+		config: config,
+		bc:     bc,
+		engine: engine,
+	}
+}
+
+type ExecutionTaskPrio struct {
+	msg    types.Message
+	config *params.ChainConfig
+
+	gasLimit          uint64
+	blockNumber       *big.Int
+	blockHash         common.Hash
+	blockContext      vm.BlockContext
+	tx                *types.Transaction
+	index             int
+	statedb           *state.StateDB // State database that stores the modified values after tx execution.
+	cleanStateDB      *state.StateDB // A clean copy of the initial statedb. It should not be modified.
+	evmConfig         vm.Config
+	result            *ExecutionResult
+	shouldDelayFeeCal *bool
+	sender            common.Address
+}
+
+func (task *ExecutionTaskPrio) Execute(mvh *blockstm.MVHashMap, incarnation int) (err error) {
+	task.statedb = task.cleanStateDB.Copy()
+	task.statedb.Prepare(task.tx.Hash(), task.index)
+	task.statedb.SetMVHashmap(mvh)
+	task.statedb.SetIncarnation(incarnation)
+
+	evm := vm.NewEVM(task.blockContext, vm.TxContext{}, task.statedb, task.config, task.evmConfig)
+
+	// Create a new context to be used in the EVM environment.
+	txContext := NewEVMTxContext(task.msg)
+	evm.Reset(txContext, task.statedb)
+
+	defer func() {
+		if r := recover(); r != nil {
+			// In some pre-matured executions, EVM will panic. Recover from panic and retry the execution.
+			log.Debug("Recovered from EVM failure. Error:\n", r)
+
+			err = blockstm.ErrExecAbort
+
+			return
+		}
+	}()
+
+	// Apply the transaction to the current state (included in the env).
+	if *task.shouldDelayFeeCal {
+		task.result, err = ApplyMessageNoFeeBurnOrTip(evm, task.msg, new(GasPool).AddGas(task.gasLimit))
+	} else {
+		task.result, err = ApplyMessage(evm, task.msg, new(GasPool).AddGas(task.gasLimit))
+	}
+
+	if task.statedb.HadInvalidRead() || err != nil {
+		err = blockstm.ErrExecAbort
+		return
+	}
+
+	task.statedb.Finalise(false)
+
+	return
+}
+
+func (task *ExecutionTaskPrio) MVReadList() []blockstm.ReadDescriptor {
+	return task.statedb.MVReadList()
+}
+
+func (task *ExecutionTaskPrio) MVWriteList() []blockstm.WriteDescriptor {
+	return task.statedb.MVWriteList()
+}
+
+func (task *ExecutionTaskPrio) MVFullWriteList() []blockstm.WriteDescriptor {
+	return task.statedb.MVFullWriteList()
+}
+
+func (task *ExecutionTaskPrio) Sender() common.Address {
+	return task.sender
+}
+
+func (p *ParallelStateProcessorPrio) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
+	var (
+		receipts    types.Receipts
+		header      = block.Header()
+		blockHash   = block.Hash()
+		blockNumber = block.Number()
+		allLogs     []*types.Log
+		usedGas     = new(uint64)
+	)
+	// Mutate the block and state according to any hard-fork specs
+	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
+		misc.ApplyDAOHardFork(statedb)
+	}
+
+	tasks := make([]blockstm.ExecTaskPrio, 0, len(block.Transactions()))
+
+	shouldDelayFeeCal := true
+
+	// Iterate over and process the individual transactions
+	for i, tx := range block.Transactions() {
+		msg, err := tx.AsMessage(types.MakeSigner(p.config, header.Number), header.BaseFee)
+		if err != nil {
+			log.Error("error creating message", "err", err)
+			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+		}
+
+		bc := NewEVMBlockContext(header, p.bc, nil)
+
+		cleansdb := statedb.Copy()
+
+		if msg.From() == bc.Coinbase {
+			shouldDelayFeeCal = false
+		}
+
+		task := &ExecutionTaskPrio{
+			msg:               msg,
+			config:            p.config,
+			gasLimit:          block.GasLimit(),
+			blockNumber:       blockNumber,
+			blockHash:         blockHash,
+			tx:                tx,
+			index:             i,
+			cleanStateDB:      cleansdb,
+			blockContext:      bc,
+			evmConfig:         cfg,
+			shouldDelayFeeCal: &shouldDelayFeeCal,
+			sender:            msg.From(),
+		}
+
+		tasks = append(tasks, task)
+	}
+
+	_, err := blockstm.ExecuteParallelPrio(tasks)
+
+	if err != nil {
+		log.Error("blockstm error executing block", "err", err)
+		return nil, nil, 0, err
+	}
+
+	london := p.config.IsLondon(blockNumber)
+
+	for _, task := range tasks {
+		task := task.(*ExecutionTaskPrio)
 		statedb.Prepare(task.tx.Hash(), task.index)
 
 		coinbaseBalance := statedb.GetBalance(task.blockContext.Coinbase)

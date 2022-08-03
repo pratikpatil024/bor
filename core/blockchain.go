@@ -206,12 +206,13 @@ type BlockChain struct {
 	running       int32          // 0 if chain is running, 1 when stopped
 	procInterrupt int32          // interrupt signaler for block processing
 
-	engine     consensus.Engine
-	validator  Validator // Block and state validator interface
-	prefetcher Prefetcher
-	processor  Processor // Block transaction processor interface
-	forker     *ForkChoice
-	vmConfig   vm.Config
+	engine        consensus.Engine
+	validator     Validator // Block and state validator interface
+	prefetcher    Prefetcher
+	processor     Processor // Block transaction processor interface
+	processorPrio Processor // Block transaction processor interface
+	forker        *ForkChoice
+	vmConfig      vm.Config
 
 	// Bor related changes
 	borReceiptsCache *lru.Cache             // Cache for the most recent bor receipt receipts per block
@@ -263,7 +264,8 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	bc.forker = NewForkChoice(bc, shouldPreserve, checker)
 	bc.validator = NewBlockValidator(chainConfig, bc, engine)
 	bc.prefetcher = newStatePrefetcher(chainConfig, bc, engine)
-	bc.processor = NewStateProcessor(chainConfig, bc, engine)
+	bc.processor = NewParallelStateProcessor(chainConfig, bc, engine)
+	bc.processorPrio = NewParallelStateProcessorPrio(chainConfig, bc, engine)
 
 	var err error
 	bc.hc, err = NewHeaderChain(db, chainConfig, engine, bc.insertStopped)
@@ -1723,8 +1725,17 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		}
 
 		// Process block using the parent state as reference point
+		cleanStatedb := statedb.Copy()
 		substart := time.Now()
-		receipts, logs, usedGas, err := bc.processor.Process(block, statedb, bc.vmConfig)
+
+		receipts, logs, usedGas, err := bc.processor.Process(block, cleanStatedb, bc.vmConfig)
+		t1 := time.Now()
+
+		receipts, logs, usedGas, err = bc.processorPrio.Process(block, statedb, bc.vmConfig)
+		t2 := time.Now()
+
+		log.Info("Process block time", "blockNumber", block.Number(), "without prioritizer time", t1.Sub(substart), "with prioritizer time", t2.Sub(t1))
+
 		if err != nil {
 			bc.reportBlock(block, receipts, err)
 			atomic.StoreUint32(&followupInterrupt, 1)
