@@ -327,7 +327,11 @@ func (bc *BlockChain) Validator() Validator {
 
 // Processor returns the current processor.
 func (bc *BlockChain) Processor() Processor {
-	return bc.processor
+	if count%2 == 0 {
+		return bc.processorSerial
+	} else {
+		return bc.processorParallel
+	}
 }
 
 // StateCache returns the caching database underpinning the blockchain instance.

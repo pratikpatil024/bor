@@ -206,12 +206,13 @@ type BlockChain struct {
 	running       int32          // 0 if chain is running, 1 when stopped
 	procInterrupt int32          // interrupt signaler for block processing
 
-	engine     consensus.Engine
-	validator  Validator // Block and state validator interface
-	prefetcher Prefetcher
-	processor  Processor // Block transaction processor interface
-	forker     *ForkChoice
-	vmConfig   vm.Config
+	engine            consensus.Engine
+	validator         Validator // Block and state validator interface
+	prefetcher        Prefetcher
+	processorSerial   Processor // Block transaction processor interface
+	processorParallel Processor // Block transaction processor interface
+	forker            *ForkChoice
+	vmConfig          vm.Config
 
 	// Bor related changes
 	borReceiptsCache *lru.Cache             // Cache for the most recent bor receipt receipts per block
@@ -223,6 +224,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator
 // and Processor.
+//
 //nolint:gocognit
 func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(header *types.Header) bool, txLookupLimit *uint64, checker ethereum.ChainValidator) (*BlockChain, error) {
 	if cacheConfig == nil {
@@ -263,7 +265,8 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	bc.forker = NewForkChoice(bc, shouldPreserve, checker)
 	bc.validator = NewBlockValidator(chainConfig, bc, engine)
 	bc.prefetcher = newStatePrefetcher(chainConfig, bc, engine)
-	bc.processor = NewStateProcessor(chainConfig, bc, engine)
+	bc.processorSerial = NewStateProcessor(chainConfig, bc, engine)
+	bc.processorParallel = NewParallelStateProcessor(chainConfig, bc, engine)
 
 	var err error
 	bc.hc, err = NewHeaderChain(db, chainConfig, engine, bc.insertStopped)
@@ -1416,6 +1419,8 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 	return status, nil
 }
 
+var count = 0
+
 // addFutureBlock checks if the block is within the max allowed window to get
 // accepted for future processing, and returns an error if the block is too far
 // ahead and was not added.
@@ -1722,9 +1727,26 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 			}
 		}
 
-		// Process block using the parent state as reference point
-		substart := time.Now()
-		receipts, logs, usedGas, err := bc.processor.Process(block, statedb, bc.vmConfig)
+		var substart time.Time
+		var receipts types.Receipts
+		var logs []*types.Log
+		var usedGas uint64
+
+		if count%2 == 0 {
+			// Process block using the parent state as reference point
+			substart = time.Now()
+			receipts, logs, usedGas, err = bc.processorSerial.Process(block, statedb, bc.vmConfig)
+			t1 := time.Now()
+			log.Info("Process block time", "blockNumber", block.Number(), "count", count, "txs", len(block.Transactions()), "Serial time", t1.Sub(substart))
+			count += 1
+		} else {
+			// Process block using the parent state as reference point
+			substart = time.Now()
+			receipts, logs, usedGas, err = bc.processorParallel.Process(block, statedb, bc.vmConfig)
+			t1 := time.Now()
+			log.Info("Process block time", "blockNumber", block.Number(), "count", count, "txs", len(block.Transactions()), "Parallel time", t1.Sub(substart))
+			count += 1
+		}
 		if err != nil {
 			bc.reportBlock(block, receipts, err)
 			atomic.StoreUint32(&followupInterrupt, 1)
